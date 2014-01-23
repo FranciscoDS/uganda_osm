@@ -119,25 +119,30 @@ def read_UGANDA(filename, shapeu):
     logo.starting("Geometry read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
         logo.progress(featnum)
-        if featnum in (6, 47, 11, 25, 67, 70, 100):
-            # skip multipolygon for now
+        if featnum in (25,):
             continue
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
         newgeometry.Transform(transform)
 
-        # Outer Ring (1) followed by Inner Rings (n-1)
-        # we create all segments for each ring to find the topology ...
-        logo.DEBUG("Feature %d with %d rings" % (featnum,
-                   newgeometry.GetGeometryCount()))
-        for i in xrange(newgeometry.GetGeometryCount()):
-            ring = newgeometry.GetGeometryRef(i)
-            lon1, lat1 = ring.GetPoint_2D(0)
-            for pnt in xrange(1, ring.GetPointCount()):
-                lon2, lat2 = ring.GetPoint_2D(pnt)
-                shapeu.makeSegment(lon1, lat1, lon2, lat2)
-                lon1, lat1 = lon2, lat2
+        # MultiPolygon: only deal with first polygon
+        # Polygon: Outer Ring (1) followed by Inner Rings (n-1)
+        # we create all segments for outer ring only, drop
+        # inner rings (very exotic ...)
+        if newgeometry.GetGeometryType() == ogr.wkbMultiPolygon:
+            logo.DEBUG("Feature %d with %d polygons" % (featnum,
+                       newgeometry.GetGeometryCount()))
+            ring = newgeometry.GetGeometryRef(0).GetGeometryRef(0)
+        else:
+            logo.DEBUG("Feature %d with %d rings" % (featnum,
+                       newgeometry.GetGeometryCount()))
+            ring = newgeometry.GetGeometryRef(0)
+        lon1, lat1 = ring.GetPoint_2D(0)
+        for pnt in xrange(1, ring.GetPointCount()):
+            lon2, lat2 = ring.GetPoint_2D(pnt)
+            shapeu.makeSegment(lon1, lat1, lon2, lat2)
+            lon1, lat1 = lon2, lat2
     logo.ending()
 
 
@@ -162,8 +167,7 @@ def admin_UGANDA(filename, shapeu, admins):
     logo.starting("Attributes read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
         logo.progress(featnum)
-        if featnum in (6, 47, 11, 25, 67, 70, 100):
-            # skip multipolygon for now
+        if featnum in (25,):
             continue
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
@@ -194,30 +198,32 @@ def admin_UGANDA(filename, shapeu, admins):
                                  "bbox" : None
                                }
 
-        # Build sets of lineid, don't distinguish outer and inner rings
-        # we deal it later when verifying and grouping rings
+        # Build sets of lineid, deal only outer, inner rings
+        # are useless and wrong
         lineset = set()
-        for i in xrange(newgeometry.GetGeometryCount()):
-            ring = newgeometry.GetGeometryRef(i)
-            pntinring = []
-            for pnt in xrange(ring.GetPointCount()):
-                lon, lat = ring.GetPoint_2D(pnt)
-                pointid = shapeu.getPoint(lon, lat)
-                if pointid is not None:
-                    pntinring.append(pointid)
+        if newgeometry.GetGeometryType() == ogr.wkbMultiPolygon:
+            ring = newgeometry.GetGeometryRef(0).GetGeometryRef(0)
+        else:
+            ring = newgeometry.GetGeometryRef(0)
+        pntinring = []
+        for pnt in xrange(ring.GetPointCount()):
+            lon, lat = ring.GetPoint_2D(pnt)
+            pointid = shapeu.getPoint(lon, lat)
+            if pointid is not None:
+                pntinring.append(pointid)
 
-            if pntinring[0] != pntinring[-1]:
-                # Simplification have broken the ring,
-                # starting point was in the middle of a simplified line
-                pntinring.append(pntinring[0])
+        if pntinring[0] != pntinring[-1]:
+            # Simplification have broken the ring,
+            # starting point was in the middle of a simplified line
+            pntinring.append(pntinring[0])
 
-            for pnt in xrange(1, len(pntinring)):
-                if pntinring[pnt-1] ==  pntinring[pnt]:
-                    # If 2 coordinates after rounding give the same point id
-                    # (safety measure, normaly doesn't happen)
-                    continue
-                segment = shapeu.getSegment(pntinring[pnt-1], pntinring[pnt])
-                lineset.add(shapeu.getLine(segment))
+        for pnt in xrange(1, len(pntinring)):
+            if pntinring[pnt-1] ==  pntinring[pnt]:
+                # If 2 coordinates after rounding give the same point id
+                # (safety measure, normaly doesn't happen)
+                continue
+            segment = shapeu.getSegment(pntinring[pnt-1], pntinring[pnt])
+            lineset.add(shapeu.getLine(segment))
 
         # Update each administrative level
         admins[key_admin2]["outer"].update(lineset)
