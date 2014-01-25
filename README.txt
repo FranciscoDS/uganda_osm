@@ -33,10 +33,22 @@ Bug :
 
 Probably ;-)
 
-This program can't cope with some features in the Uganda_district file :
- - features 6, 47 : seems to be multipolygon in a polygon file
- - features 11, 25, 67, 70, 100 : programs goes into an infinite loop
- - automatic aggregate of the district into subregion (infinite loop)
+The district shapefile is not well formed causing issues in conversion :
+ - features 6, 47 : are multipolygon in a polygon file
+ - features 11, 67, 70, 100 : polygons with very strange inner ring
+ - features 25 : polygon with a small banana loop
+ - several very close but not shared point between polygons
 
-Those features have been skipped for now.
+This program deal those case as follow :
+ - only convert the first (and only one usefull) polygon in a multipolygon
+ - ignore inner ring
+ - banana loop is converted/simplified into an unconnected way
+ - rounding points to 5 decimals
+
+The output will have the following issues :
+ - too many parallel ways that need to be merged and shared between admin
+ - one useless and unconnected way
+
+The small and unconnected way will raise an error (ring not closed) but
+it's ok, all relations are correctly created.
 
