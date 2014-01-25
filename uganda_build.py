@@ -119,8 +119,6 @@ def read_UGANDA(filename, shapeu):
     logo.starting("Geometry read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
         logo.progress(featnum)
-        if featnum in (25,):
-            continue
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
@@ -167,8 +165,6 @@ def admin_UGANDA(filename, shapeu, admins):
     logo.starting("Attributes read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
         logo.progress(featnum)
-        if featnum in (25,):
-            continue
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
@@ -185,7 +181,6 @@ def admin_UGANDA(filename, shapeu, admins):
         #                             "level" : 6,
         #                             "inner" : set(),
         #                             "outer" : set(),
-        #                             "bbox" : None
         #                       }
 
         # District
@@ -195,7 +190,6 @@ def admin_UGANDA(filename, shapeu, admins):
                                  "level" : 7,
                                  "inner" : set(),
                                  "outer" : set(),
-                                 "bbox" : None
                                }
 
         # Build sets of lineid, deal only outer, inner rings
@@ -252,6 +246,10 @@ def verify_admin(shapeu, admins):
         if closedrings.getLineDiscarded():
             logo.ERROR("Area '%s' ring not closed\n"
                        % (admins[adm]["name"]) )
+            for line in closedrings.getLineDiscarded():
+                coords = shapeu.getLineCoords(line)
+                logo.DEBUG("Line in ring with %d points still open %s -> %s"
+                           % (len(coords), coords[0], coords[-1]) )
 
         # Moving lineids from outer to inner and compute envelope
         for outer, inner in closedrings.iterPolygons():
@@ -259,20 +257,6 @@ def verify_admin(shapeu, admins):
                 lineids = closedrings.getLineRing(ring)
                 admins[adm]["outer"].difference_update(lineids)
                 admins[adm]["inner"].update(lineids)
-
-            # Bounding box on outer rings
-            xmin, xmax, ymin, ymax = closedrings.getExtentRing(outer)
-            if not admins[adm]["bbox"]:
-                admins[adm]["bbox"] = [ xmin, xmax, ymin, ymax ]
-            else:
-                if xmin < admins[adm]["bbox"][0]:
-                    admins[adm]["bbox"][0] = xmin
-                if xmax > admins[adm]["bbox"][1]:
-                    admins[adm]["bbox"][1] = xmax
-                if ymin < admins[adm]["bbox"][2]:
-                    admins[adm]["bbox"][2] = ymin
-                if ymax > admins[adm]["bbox"][3]:
-                    admins[adm]["bbox"][3] = ymax
 
     logo.ending()
 
@@ -332,9 +316,6 @@ def create_uganda_table(db):
                         version int,
                         action character(1)
                       )""")
-    cursor.execute("""SELECT AddGeometryColumn('uganda_relations', 'bbox',
-                                               4326, 'GEOMETRY', 2)
-                   """)
     cursor.execute("""DROP TABLE IF EXISTS uganda_relation_members""")
     cursor.execute("""CREATE TABLE uganda_relation_members (
                         uganda_id bigint NOT NULL,
@@ -379,9 +360,6 @@ def create_uganda_table(db):
     logo.DEBUG("Create index")
     cursor.execute("""CREATE INDEX idx_uganda_node_geom
                       ON uganda_nodes USING gist (geom)
-                   """)
-    cursor.execute("""CREATE INDEX idx_uganda_relation_bbox
-                      ON uganda_relations USING gist (bbox)
                    """)
 
     # Create index for tags
@@ -435,9 +413,6 @@ def create_temp_table(db):
                         level int NOT NULL,
                         PRIMARY KEY (admin_id)
                       )""")
-    cursor.execute("""SELECT AddGeometryColumn('uganda_admins', 'bbox',
-                                               4326, 'GEOMETRY', 2)
-                   """)
 
     # Table for bulk copy content in lines/admins
     cursor.execute("""CREATE TEMPORARY TABLE uganda_linepts (
@@ -532,8 +507,7 @@ def import_uganda(db, shapeu, admins):
     for (num,adm) in enumerate(admins):
         logo.progress()
         buffcopy1.write("%d\t" % num)
-        buffcopy1.write("%(name)s\t%(level)d\t" % admins[adm])
-        buffcopy1.write("SRID=4326;POLYGON((%(x1).7f %(y1).7f,%(x1).7f %(y2).7f,%(x2).7f %(y2).7f,%(x2).7f %(y1).7f,%(x1).7f %(y1).7f))\n" % dict(zip(['x1', 'x2', 'y1', 'y2'], admins[adm]['bbox'])) )
+        buffcopy1.write("%(name)s\t%(level)d\n" % admins[adm])
         sequenceid = 0
         for role in ("outer", "inner"):
             for lineid in admins[adm][role]:
@@ -551,9 +525,9 @@ def import_uganda(db, shapeu, admins):
     db.commit()
     buffcopy1.seek(0)
     cursor.copy_from(buffcopy1, 'uganda_admins', columns=('admin_id', 'name',
-                                                        'level', 'bbox'))
-    cursor.execute("""INSERT INTO uganda_relations (uganda_id, bbox)
-                      SELECT uganda_id, bbox FROM uganda_admins
+                                                        'level'))
+    cursor.execute("""INSERT INTO uganda_relations (uganda_id)
+                      SELECT uganda_id FROM uganda_admins
                    """)
     buffcopy2.seek(0)
     cursor.copy_from(buffcopy2, 'uganda_adminlines')

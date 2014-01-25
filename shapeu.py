@@ -369,15 +369,13 @@ class ShapeUtil:
             self.line_seg[int(segmentdir1/2)] = lineid
             coordpts.insert(0, self.coord_pnt[segmentdir1])
             nbprev = self.nbrConnection(segmentdir1)
-
-        # Join next segments if it's the only connection
-        while nbnext == 1:
-            if self.segment_connect[segmentdir2] == segmentnum:
-                break               # loop on closed ring
-            segmentdir2 = self.segment_connect[segmentdir2] ^ 1
-            self.line_seg[int(segmentdir2/2)] = lineid
-            coordpts.append(self.coord_pnt[segmentdir2])
-            nbnext = self.nbrConnection(segmentdir2)
+        else:
+            # Join next segments if it's the only connection and not a loop
+            while nbnext == 1:
+                segmentdir2 = self.segment_connect[segmentdir2] ^ 1
+                self.line_seg[int(segmentdir2/2)] = lineid
+                coordpts.append(self.coord_pnt[segmentdir2])
+                nbnext = self.nbrConnection(segmentdir2)
         return coordpts
 
 
@@ -402,11 +400,16 @@ class ShapeUtil:
                 segmentnum  = self.point_pos[coord]
                 segmentdir1 = self.segment_connect[segmentnum]
                 segmentdir2 = segmentdir1^1
-                self.segment_connect[segmentnum] = self.segment_connect[segmentdir2]
                 seg = self.segment_connect[segmentdir2]
-                while self.segment_connect[seg] != segmentdir2:
-                    seg = self.segment_connect[seg]
-                self.segment_connect[seg] = segmentnum
+                if seg == segmentdir2:
+                    # Adopting a loose end is easy
+                    self.segment_connect[segmentnum] = segmentnum
+                else:
+                    # Remove 2nd segment from the linked list
+                    while self.segment_connect[seg] != segmentdir2:
+                        seg = self.segment_connect[seg]
+                    self.segment_connect[segmentnum] = self.segment_connect[segmentdir2]
+                    self.segment_connect[seg] = segmentnum
                 self.segment_connect[segmentdir1] = segmentdir1
                 self.segment_connect[segmentdir2] = segmentdir2
 
@@ -469,8 +472,8 @@ class ShapeUtil:
         Return False if self-intersecting or self-touching.
         """
 
-        assert points[0] == points[-1], (
-                   "Ring not closed %r <-> %r" % (points[0], points[-1]) )
+        if points[0] != points[-1]:
+            return False
 
         # LinearRing should be simple
         # - point (except first/last) appearing once
