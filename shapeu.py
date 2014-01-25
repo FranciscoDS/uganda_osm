@@ -27,7 +27,7 @@ topology magic.
 
 import math
 import array
-precision = 9   # Compute with 9 digits but truncated for OSM to 7 digits
+precision = 5   # Compute with less digits than OSM (7 digits) to glue some very close points
 import logo
 
 
@@ -174,8 +174,8 @@ class ShapeUtil:
         Return the id of the line or None if doesn't exist.
         """
 
-        if self.line_seg[segmentnum/2]:
-            return self.line_seg[segmentnum/2]
+        if self.line_seg[int(segmentnum/2)]:
+            return self.line_seg[int(segmentnum/2)]
         return None
 
 
@@ -259,78 +259,53 @@ class ShapeUtil:
         logo.DEBUG("Before simplification %d points, %d segments" % (
                    len(self.point_pos), self.segment_count/2))
         logo.starting("Line simplification", self.segment_count)
+        self.line_seg = array.array('i', [0] * (self.cachemem/2))
+        self.line_ends = array.array('i')
+        self.line_count = 0
+        specialjoinset = set()
         for segmentnum in xrange(0, self.segment_count, 2):
             logo.progress(segmentnum)
-            if self.line_seg[segmentnum/2]:   # Already attached
+            if self.line_seg[segmentnum/2]:
+                # Already attached
                 continue
-            segmentdir1 = segmentnum
-            segmentdir2 = segmentnum + 1
-
-            # Count predecessors/successors
-            nbprev = self.nbrConnection(segmentdir1)
-            nbnext = self.nbrConnection(segmentdir2)
-            if nbprev == 0 and nbnext == 0:
+            coordpts = self._buildLineFromSegment(segmentnum)
+            if coordpts is None:
                 # Orphaned segment, happens when a point is simplified
                 continue
+            self._simplifyLineSegment(coordpts, specialjoinset)
+        logo.ending()
 
-            # Affect a lineid to the current segment
-            self.line_count += 1
-            lineid = self.line_count
-            self.line_seg[segmentdir1/2] = lineid
-            coordpts = [ self.coord_pnt[segmentdir1],
-                         self.coord_pnt[segmentdir2] ]
+        # Special case for merged segment (duplicate segment removed)
+        # Redo search+simplify on the longest possible line
+        nbpass = 1
+        while specialjoinset:
+            nbpass += 1
+            logo.starting("Line simplification (pass %d)" % nbpass,
+                          len(specialjoinset))
+            newjoinset = set()
+            for lineid in specialjoinset:
+                logo.progress()
+                try:
+                    segmentnum = self.line_seg.index(lineid) * 2
+                except ValueError:
+                    continue
+                coordpts = self._buildLineFromSegment(segmentnum, lineid)
+                self._simplifyLineSegment(coordpts, newjoinset)
+            logo.ending()
+            specialjoinset = newjoinset
 
-            # Join previous segments if it's the only connection
-            while nbprev == 1:
-                if self.line_seg[self.segment_connect[segmentdir1]/2]:
-                    break               # loop on closed ring
-                segmentdir1 = self.segment_connect[segmentdir1] ^ 1
-                self.line_seg[segmentdir1/2] = lineid
-                coordpts.insert(0, self.coord_pnt[segmentdir1])
-                nbprev = self.nbrConnection(segmentdir1)
-
-            # Join next segments if it's the only connection
-            while nbnext == 1:
-                if self.line_seg[self.segment_connect[segmentdir2]/2]:
-                    break               # loop on closed ring
-                segmentdir2 = self.segment_connect[segmentdir2] ^ 1
-                self.line_seg[segmentdir2/2] = lineid
-                coordpts.append(self.coord_pnt[segmentdir2])
-                nbnext = self.nbrConnection(segmentdir2)
-
-            # Find useless points
-            coordpts, purgepts = simplifyPoints(coordpts)
-            coordpts, purgepts = simplifyShapeZV(coordpts, purgepts)
-            coordpts, purgepts = fixSelfIntersect(coordpts, purgepts)
-
-            # Now the *not so* fun part, we change and delete some segments.
-            # The ids will change so we work with point coordinates and we
-            # keep track of all the dependencies.
-            # A simplified point have only 2 segments, the first segment will
-            # adopt a new location for its end, the second segment will be
-            # entirely dereferenced.
-            for coord in purgepts:
-                segmentnum  = self.point_pos[coord]
-                segmentdir1 = self.segment_connect[segmentnum]
-                segmentdir2 = segmentdir1^1
-                self.segment_connect[segmentnum] = self.segment_connect[segmentdir2]
-                seg = self.segment_connect[segmentdir2]
-                while self.segment_connect[seg] != segmentdir2:
-                    seg = self.segment_connect[seg]
-                self.segment_connect[seg] = segmentnum
-                self.segment_connect[segmentdir1] = segmentdir1
-                self.segment_connect[segmentdir2] = segmentdir2
-
-                # Update new end point location
-                coord2 = self.coord_pnt[segmentdir2]
-                self.coord_pnt[segmentnum] = coord2
-                if self.point_pos[coord2] == segmentdir2:
-                    self.point_pos[coord2] = segmentnum
-                del self.point_pos[coord]
-                self.coord_pnt[segmentdir1] = None
-                self.coord_pnt[segmentdir2] = None
-                self.line_seg[segmentdir2/2] = 0
-
+        logo.starting("Build way with 2000 nodes limit", self.segment_count)
+        self.line_seg = array.array('i', [0] * (self.cachemem/2))
+        self.line_ends = array.array('i')
+        self.line_count = 0
+        for segmentnum in xrange(0, self.segment_count, 2):
+            logo.progress(segmentnum)
+            if self.line_seg[segmentnum/2]:
+                # Already attached
+                continue
+            coordpts = self._buildLineFromSegment(segmentnum)
+            if coordpts is None:
+                continue
 
             # Split if we are too close to the limit of 2000 nodes
             # and ensure that a new line have more than a few points
@@ -355,7 +330,7 @@ class ShapeUtil:
                 segmentnum = self.segment_connect[segmentnum]
                 self.line_ends.append(segmentnum)
                 for i in xrange(1, min(1980, len(coordpts))):
-                    self.line_seg[segmentnum/2] = lineid
+                    self.line_seg[int(segmentnum/2)] = lineid
                     segmentnum = self.segment_connect[segmentnum^1]
             segmentdir1 = self.point_pos[coordpts[-2]]
             segmentdir2 = self.point_pos[coordpts[-1]]
@@ -366,6 +341,115 @@ class ShapeUtil:
         logo.ending()
         logo.DEBUG("After simplification %d points, %d lines" % (
                    len(self.point_pos), self.line_count))
+
+
+    def _buildLineFromSegment(self, segmentnum, lineid=0):
+        segmentdir1 = segmentnum
+        segmentdir2 = segmentnum + 1
+
+        # Count predecessors/successors
+        nbprev = self.nbrConnection(segmentdir1)
+        nbnext = self.nbrConnection(segmentdir2)
+        if nbprev == 0 and nbnext == 0:
+            return None   # Segment removed
+
+        # Affect a lineid to the current segment
+        if not lineid:
+            self.line_count += 1
+            lineid = self.line_count
+        self.line_seg[int(segmentdir1/2)] = lineid
+        coordpts = [ self.coord_pnt[segmentdir1],
+                     self.coord_pnt[segmentdir2] ]
+
+        # Join previous segments if it's the only connection
+        while nbprev == 1:
+            if self.segment_connect[segmentdir1] == segmentnum+1:
+                break               # loop on closed ring
+            segmentdir1 = self.segment_connect[segmentdir1] ^ 1
+            self.line_seg[int(segmentdir1/2)] = lineid
+            coordpts.insert(0, self.coord_pnt[segmentdir1])
+            nbprev = self.nbrConnection(segmentdir1)
+
+        # Join next segments if it's the only connection
+        while nbnext == 1:
+            if self.segment_connect[segmentdir2] == segmentnum:
+                break               # loop on closed ring
+            segmentdir2 = self.segment_connect[segmentdir2] ^ 1
+            self.line_seg[int(segmentdir2/2)] = lineid
+            coordpts.append(self.coord_pnt[segmentdir2])
+            nbnext = self.nbrConnection(segmentdir2)
+        return coordpts
+
+
+    def _simplifyLineSegment(self, coordpts, specialjoinset):
+            # Find useless points
+            coordpts, purgepts = simplifyPoints(coordpts)
+            coordpts, purgepts = simplifyShapeZV(coordpts, purgepts)
+            coordpts, purgepts = fixSelfIntersect(coordpts, purgepts)
+
+            # Now the *not so* fun part, we change and delete some segments.
+            # The ids will change so we work with point coordinates and we
+            # keep track of all the dependencies.
+            # A simplified point have only 2 segments, the first segment will
+            # adopt a new location for its end, the second segment will be
+            # entirely dereferenced.
+            # Special case in not well-formed shape, the first segment could
+            # become a duplicate of an already existing segment, we need to
+            # dereference it and remember to redo a topological scan because
+            # the merge will alter the number of connection (postpone the
+            # search for optimal line's length). 
+            for coord in purgepts:
+                segmentnum  = self.point_pos[coord]
+                segmentdir1 = self.segment_connect[segmentnum]
+                segmentdir2 = segmentdir1^1
+                self.segment_connect[segmentnum] = self.segment_connect[segmentdir2]
+                seg = self.segment_connect[segmentdir2]
+                while self.segment_connect[seg] != segmentdir2:
+                    seg = self.segment_connect[seg]
+                self.segment_connect[seg] = segmentnum
+                self.segment_connect[segmentdir1] = segmentdir1
+                self.segment_connect[segmentdir2] = segmentdir2
+
+                # Update new end point location
+                coord2 = self.coord_pnt[segmentdir2]
+                self.coord_pnt[segmentnum] = coord2
+                if self.point_pos[coord2] == segmentdir2:
+                    self.point_pos[coord2] = segmentnum
+                del self.point_pos[coord]
+                self.coord_pnt[segmentdir1] = None
+                self.coord_pnt[segmentdir2] = None
+                self.line_seg[int(segmentdir2/2)] = 0
+
+                # Remove if with this new end it duplicate an existing segment
+                segmentdir1 = segmentnum^1
+                segmentdir2 = segmentnum
+                segnum = self.segment_connect[segmentdir1]
+                while segnum != segmentdir1:
+                    if self.coord_pnt[segnum^1] == coord2:
+                        seg = self.segment_connect[segmentdir1]
+                        while self.segment_connect[seg] != segmentdir1:
+                            seg = self.segment_connect[seg]
+                        self.segment_connect[seg] = self.segment_connect[segmentdir1]
+                        self.segment_connect[segmentdir1] = segmentdir1
+                        if self.point_pos[self.coord_pnt[segmentdir1]] == segmentdir1:
+                            self.point_pos[self.coord_pnt[segmentdir1]] = seg
+
+                        seg = self.segment_connect[segmentdir2]
+                        while self.segment_connect[seg] != segmentdir2:
+                            seg = self.segment_connect[seg]
+                        self.segment_connect[seg] = self.segment_connect[segmentdir2]
+                        self.segment_connect[segmentdir2] = segmentdir2
+                        if self.point_pos[self.coord_pnt[segmentdir2]] == segmentdir2:
+                            self.point_pos[self.coord_pnt[segmentdir2]] = seg
+
+                        self.coord_pnt[segmentdir1] = None
+                        self.coord_pnt[segmentdir2] = None
+                        if self.line_seg[int(segnum/2)]:
+                            # Merged into segment need to be redone
+                            specialjoinset.add(self.line_seg[int(segnum/2)])
+                        self.line_seg[int(segmentdir2/2)] = 0
+                        break
+                    segnum = self.segment_connect[segnum]
 
 
     def nbrConnection(self, pointid):
