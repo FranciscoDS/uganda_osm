@@ -27,8 +27,22 @@ topology magic.
 
 import math
 import array
-precision = 5   # Compute with less digits than OSM (7 digits) to glue some very close points
 import logo
+precision = 5   # Compute with less digits than OSM (7 digits) to glue some very close points
+testnearest = [
+    (-1.0 * 10**(-precision), 0.0),
+    (0.0,  1.0 * 10**(-precision)),
+    ( 1.0 * 10**(-precision), 0.0),
+    (0.0, -1.0 * 10**(-precision)),
+    (-1.0 * 10**(-precision), 1.0 * 10**(-precision)),
+    ( 1.0 * 10**(-precision), 1.0 * 10**(-precision)),
+    ( 1.0 * 10**(-precision),-1.0 * 10**(-precision)),
+    (-1.0 * 10**(-precision),-1.0 * 10**(-precision)),
+    (-2.0 * 10**(-precision), 0.0),
+    (0.0, 2.0 * 10**(-precision)),
+    ( 2.0 * 10**(-precision), 0.0),
+    (0.0, -2.0 * 10**(-precision)),
+]
 
 
 class ShapeUtil:
@@ -48,6 +62,26 @@ class ShapeUtil:
         self.segment_count = 0
         self.line_count = 0
         self.cachemem = mem                   # nb object max in memory
+        self.glue_nearest = {}
+
+
+    def roundCoord(self, lon, lat):
+        """
+        Return tuple of rounded coordinate.
+        Try to reuse existing point if there is one near coordinate.
+        """
+
+        key = ( round(lon, precision), round(lat, precision) )
+        if key in self.point_pos:
+            return key
+        if key in self.glue_nearest:
+            return self.glue_nearest[key]
+        for dlon, dlat in testnearest:
+            gluedkey = ( round(lon+dlon, precision), round(lat+dlat, precision) )
+            if gluedkey in self.point_pos:
+                self.glue_nearest[key] = gluedkey
+                return gluedkey
+        return key
 
 
     def makeSegment(self, lon1, lat1, lon2, lat2):
@@ -58,18 +92,12 @@ class ShapeUtil:
         ends will always get the same id.
         """
 
-        lon1 = round(lon1, precision)
-        lon2 = round(lon2, precision)
-        lat1 = round(lat1, precision)
-        lat2 = round(lat2, precision)
-        if lon1 < lon2 or (lon1 == lon2 and lat1 < lat2):
-            key1 = (lon1, lat1)
-            key2 = (lon2, lat2)
-        else:
-            key1 = (lon2, lat2)
-            key2 = (lon1, lat1)
+        key1 = self.roundCoord(lon1, lat1)
+        key2 = self.roundCoord(lon2, lat2)
+        if key1 > key2:
+            key1, key2 = key2, key1
 
-        if (lat1==lat2 and lon1==lon2):
+        if key1 == key2:
             # Segment with identical point happens when precision is reduced
             return None
 
@@ -135,9 +163,7 @@ class ShapeUtil:
         Return the id of the point or None if doesn't exist.
         """
 
-        lon = round(lon, precision)
-        lat = round(lat, precision)
-        key = (lon, lat)
+        key = self.roundCoord(lon, lat)
         if self.point_pos.has_key(key):
             return self.point_pos[key]
         return None
