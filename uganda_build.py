@@ -23,8 +23,8 @@
 
 import sys
 import re
-import psycopg2
-from cStringIO import StringIO
+import os
+import datetime
 from osgeo import gdal, ogr, osr
 from shapeu import ShapeUtil
 from ringue import FindClosedRings
@@ -34,10 +34,6 @@ import uganda_config
 # GDAL 1.9.0 can do the ISO8859-1 to UTF-8 recoding for us
 # but will do it ourself to be backward compatible
 gdal.SetConfigOption('SHAPE_ENCODING', '')
-
-# Use SQL operator IN with set() like tuple (reuse tuple adaptation)
-psycopg2.extensions.register_adapter(set, lambda x:
-                                           psycopg2.extensions.adapt(tuple(x)))
 
 
 #
@@ -103,9 +99,14 @@ def read_UGANDA(filename, shapeu):
     layerDef = layer.GetLayerDefn()
 
     # Verify field and geometry type
-    for field in ( "DNAME_2010", "SUBREGION" ):
-        if layerDef.GetFieldIndex(field) == -1:
-            raise logo.ERROR("Field '%s' not found" % field)
+    for possiblefields in [ ("DNAME_2010", "SUBREGION"), ("region", "place") ]:
+        for field in possiblefields:
+            if layerDef.GetFieldIndex(field) == -1:
+                break
+        else:
+            break
+    else:
+        raise logo.ERROR("Important field missing, where is the admin area name ?")
     if layerDef.GetGeomType() != ogr.wkbPolygon:
         raise logo.ERROR("Not a POLYGON file")
 
@@ -161,6 +162,18 @@ def admin_UGANDA(filename, shapeu, admins):
     dstSpatialRef.SetWellKnownGeogCS('WGS84')
     transform = osr.CoordinateTransformation(srcSpatialRef, dstSpatialRef)
 
+    # Extract attributes from district or merged file
+    if layerDef.GetFieldIndex("SUBREGION") == -1:
+        fieldregion = "region"
+        fielddistrict = "place"
+    else:
+        fieldregion = "SUBREGION"
+        fielddistrict = "DNAME_2010"
+
+    # Change here the admin area level !!!
+    LevelSubRegion = 6
+    LevelDistrict = 7
+
     # Reread each polygon and create the right administrative area
     logo.starting("Attributes read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
@@ -169,28 +182,48 @@ def admin_UGANDA(filename, shapeu, admins):
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
         newgeometry.Transform(transform)
-        subregion = convertname(feature.GetField("SUBREGION"))
-        district  = convertname(feature.GetField("DNAME_2010"))
+        subregion = feature.GetField(fieldregion)
+        district  = feature.GetField(fielddistrict)
         logo.DEBUG("Feature %d SUBREGION='%s' DISTRICT='%s'" % (
                    featnum, subregion, district))
 
-        # Subregion
-        #key_admin1 = "SR_" + subregion
-        #if key_admin1 not in admins:
-        #    admins[key_admin1] = { "name" : subregion,
-        #                             "level" : 6,
-        #                             "inner" : set(),
-        #                             "outer" : set(),
-        #                       }
-
-        # District
-        key_admin2 = "DI_" + district
-        if key_admin2 not in admins:
-            admins[key_admin2] = { "name" : district,
-                                 "level" : 7,
-                                 "inner" : set(),
-                                 "outer" : set(),
-                               }
+        # Subregion / District
+        if district is None:
+            # Merged file and polygon is region
+            key_admin1 = None
+            key_admin2 = "SR_" + subregion.upper()
+            if key_admin2 not in admins:
+                admins[key_admin2] = { "name" : convertname(subregion),
+                                       "level" : LevelSubRegion,
+                                       "inner" : set(),
+                                       "outer" : set(),
+                                     }
+        elif subregion is None:
+            # Merged file and polygon is district
+            key_admin1 = None
+            key_admin2 = "DI_" + district.upper()
+            if key_admin2 not in admins:
+                admins[key_admin2] = { "name" : convertname(district),
+                                       "level" : LevelDistrict,
+                                       "inner" : set(),
+                                       "outer" : set(),
+                                     }
+        else:
+            # District only file, automagicaly build region from district
+            key_admin1 = "SR_" + subregion.upper()
+            key_admin2 = "DI_" + district.upper()
+            if key_admin1 not in admins:
+                admins[key_admin1] = { "name" : convertname(subregion),
+                                       "level" : LevelSubRegion,
+                                       "inner" : set(),
+                                       "outer" : set(),
+                                     }
+            if key_admin2 not in admins:
+                admins[key_admin2] = { "name" : convertname(district),
+                                       "level" : LevelDistrict,
+                                       "inner" : set(),
+                                       "outer" : set(),
+                                     }
 
         # Build sets of lineid, deal only outer, inner rings
         # are useless and wrong
@@ -221,7 +254,8 @@ def admin_UGANDA(filename, shapeu, admins):
 
         # Update each administrative level
         admins[key_admin2]["outer"].update(lineset)
-        #admins[key_admin1]["outer"].symmetric_difference_update(lineset)
+        if key_admin1 is not None:
+            admins[key_admin1]["outer"].symmetric_difference_update(lineset)
     logo.ending()
 
 
@@ -261,337 +295,57 @@ def verify_admin(shapeu, admins):
     logo.ending()
 
 
-def create_uganda_table(db):
-    """ Recreate uganda tables. """
-
-    cursor = db.cursor()
-
-    # Create node tables
-    logo.DEBUG("Create Node tables")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_nodes""")
-    cursor.execute("""CREATE TABLE uganda_nodes (
-                        uganda_id bigint NOT NULL,
-                        osmid bigint,
-                        version int,
-                        action character(1)
-                      )""")
-    cursor.execute("""SELECT AddGeometryColumn('uganda_nodes', 'geom',
-                                               4326, 'POINT', 2)
-                   """)
-    cursor.execute("""DROP TABLE IF EXISTS uganda_node_tags""")
-    cursor.execute("""CREATE TABLE uganda_node_tags (
-                        uganda_id bigint NOT NULL,
-                        k text NOT NULL,
-                        v text NOT NULL
-                      )""")
-
-    # Create way tables
-    logo.DEBUG("Create Way tables")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_ways""")
-    cursor.execute("""CREATE TABLE uganda_ways (
-                        uganda_id bigint NOT NULL,
-                        osmid bigint,
-                        version int,
-                        action character(1)
-                      )""")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_way_nodes""")
-    cursor.execute("""CREATE TABLE uganda_way_nodes (
-                        uganda_id bigint NOT NULL,
-                        node_id bigint NOT NULL,
-                        sequence_id int NOT NULL
-                      )""")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_way_tags""")
-    cursor.execute("""CREATE TABLE uganda_way_tags (
-                        uganda_id bigint NOT NULL,
-                        k text NOT NULL,
-                        v text NOT NULL
-                      )""")
-
-    # Create relation tables
-    logo.DEBUG("Create Relation tables")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_relations""")
-    cursor.execute("""CREATE TABLE uganda_relations (
-                        uganda_id bigint NOT NULL,
-                        osmid int,
-                        version int,
-                        action character(1)
-                      )""")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_relation_members""")
-    cursor.execute("""CREATE TABLE uganda_relation_members (
-                        uganda_id bigint NOT NULL,
-                        member_id bigint NOT NULL,
-                        member_type character(1) NOT NULL,
-                        member_role text NOT NULL,
-                        sequence_id int NOT NULL
-                      )""")
-    cursor.execute("""DROP TABLE IF EXISTS uganda_relation_tags""")
-    cursor.execute("""CREATE TABLE uganda_relation_tags (
-                        uganda_id bigint NOT NULL,
-                        k text NOT NULL,
-                        v text NOT NULL
-                      )""")
-
-    # Primary key for node, way, relation
-    logo.DEBUG("Create primary key")
-    cursor.execute("""ALTER TABLE uganda_nodes
-                      ADD CONSTRAINT pk_uganda_nodes
-                        PRIMARY KEY (uganda_id)
-                       """)
-    cursor.execute("""ALTER TABLE uganda_ways
-                      ADD CONSTRAINT pk_uganda_ways
-                        PRIMARY KEY (uganda_id)
-                   """)
-    cursor.execute("""ALTER TABLE uganda_relations
-                      ADD CONSTRAINT pk_uganda_relations
-                        PRIMARY KEY (uganda_id)
-                   """)
-
-    # Primary key for nodes in way, members in relation
-    cursor.execute("""ALTER TABLE uganda_way_nodes
-                      ADD CONSTRAINT pk_uganda_way_nodes
-                        PRIMARY KEY (uganda_id, sequence_id)
-                   """)
-    cursor.execute("""ALTER TABLE uganda_relation_members
-                      ADD CONSTRAINT pk_uganda_relation_members
-                        PRIMARY KEY (uganda_id, sequence_id)
-                   """)
-
-    # Create spatial index
-    logo.DEBUG("Create index")
-    cursor.execute("""CREATE INDEX idx_uganda_node_geom
-                      ON uganda_nodes USING gist (geom)
-                   """)
-
-    # Create index for tags
-    cursor.execute("""CREATE INDEX idx_uganda_node_tags
-                      ON uganda_node_tags USING btree (uganda_id)
-                   """)
-    cursor.execute("""CREATE INDEX idx_uganda_way_tags
-                      ON uganda_way_tags USING btree (uganda_id)
-                   """)
-    cursor.execute("""CREATE INDEX idx_uganda_relation_tags
-                      ON uganda_relation_tags USING btree (uganda_id)
-                   """)
-
-    # Auto-incrementing sequence for uganda_id
-    logo.DEBUG("Create sequence")
-    cursor.execute("""DROP SEQUENCE IF EXISTS seq_uganda_id""")
-    cursor.execute("""CREATE SEQUENCE seq_uganda_id INCREMENT BY -1""")
-
-    db.commit()
-
-
-def create_temp_table(db):
-    """
-    Create temporary table to assign uganda_id to line, point, admin.
-    """
-
-    cursor = db.cursor()
-
-    # Table converting id into unique id
-    logo.DEBUG("Create Temporary tables")
-    cursor.execute("""CREATE TEMPORARY TABLE uganda_points (
-                        point_id int NOT NULL,
-                        uganda_id bigint NOT NULL
-                          DEFAULT nextval('seq_uganda_id'),
-                        PRIMARY KEY (point_id)
-                          )""")
-    cursor.execute("""SELECT AddGeometryColumn('uganda_points', 'geom',
-                                               4326, 'POINT', 2)
-                   """)
-    cursor.execute("""CREATE TEMPORARY TABLE uganda_lines (
-                        line_id int NOT NULL,
-                        uganda_id bigint NOT NULL
-                          DEFAULT nextval('seq_uganda_id'),
-                        PRIMARY KEY (line_id)
-                          )""")
-    cursor.execute("""CREATE TEMPORARY TABLE uganda_admins (
-                        admin_id int NOT NULL,
-                        uganda_id bigint NOT NULL
-                          DEFAULT nextval('seq_uganda_id'),
-                        name text NOT NULL,
-                        level int NOT NULL,
-                        PRIMARY KEY (admin_id)
-                      )""")
-
-    # Table for bulk copy content in lines/admins
-    cursor.execute("""CREATE TEMPORARY TABLE uganda_linepts (
-                        line_id int NOT NULL,
-                        sequence_id int NOT NULL,
-                        point_id int NOT NULL,
-                        PRIMARY KEY (line_id, sequence_id)
-                      )""")
-    cursor.execute("""CREATE TEMPORARY TABLE uganda_adminlines (
-                        admin_id int NOT NULL,
-                        line_id int NOT NULL,
-                        role text NOT NULL,
-                        sequence_id int NOT NULL,
-                        PRIMARY KEY (admin_id, sequence_id)
-                      )""")
-
-    db.commit()
-
-
-def import_uganda(db, shapeu, admins):
+def write_uganda(fileout, shapeu, admins):
     """
     Import with an unique id all nodes, ways, relations.
     """
 
-    cursor = db.cursor()
     logo.starting("Saving nodes, ways, relations",
                   shapeu.nbrPoints() + shapeu.nbrLines() + len(admins))
 
+    out = open(fileout+".osm", "w")
+    tmstamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+    out.write('<osm version="0.6" generator="test">\n')
+
     # Points -> Nodes
-    # - bulk copy to a temp table to get a new unique id
-    # - do only one big insert with new ids to the finale table
-    logo.DEBUG("Write nodes to database")
-    buffcopy = StringIO()
+    logo.DEBUG("Write nodes")
     for pointid, coord in shapeu.iterPoints():
         logo.progress()
-        pointEwkt = "SRID=4326;POINT(%.7f %.7f)" % (coord[0], coord[1])
-        buffcopy.write("%d\t%s\n" % (pointid, pointEwkt))
-    buffcopy.seek(0)
-    cursor.copy_from(buffcopy, 'uganda_points', columns=('point_id', 'geom'))
-    cursor.execute("""INSERT INTO uganda_nodes (uganda_id, geom)
-                      SELECT uganda_id, geom FROM uganda_points
-                   """)
-    db.commit()
-    buffcopy.close()
+        out.write('  <node id="-%d" lat="%.7f" lon="%.7f" version="0" timestamp="%s"/>\n'
+                  % (pointid+1, coord[1], coord[0], tmstamp))
 
     # Lines -> Ways
-    # - bulk copy to a temp table to get a new unique id
-    # - bulk copy points in lines in a temp table
-    # - insert all ways with new ids as administrative level 8
-    logo.DEBUG("Write ways to database")
-    buffcopy1 = StringIO()
-    buffcopy2 = StringIO()
+    logo.DEBUG("Write ways")
+    waylevel = {}
+    for adm in admins:
+        for lineid in admins[adm]["outer"]:
+            level = min(waylevel.get(lineid, 8), admins[adm]["level"])
+            waylevel[lineid] = level
     for lineid, pntids in shapeu.iterLines():
         logo.progress()
-        buffcopy1.write("%d\n" % lineid)
-        for orderpntid in enumerate(pntids):
-            buffcopy2.write("%d\t" % lineid)
-            buffcopy2.write("%d\t%d\n" % orderpntid)
-    buffcopy1.seek(0)
-    cursor.copy_from(buffcopy1, 'uganda_lines', columns=('line_id',))
-    cursor.execute("""INSERT INTO uganda_ways (uganda_id)
-                      SELECT uganda_id FROM uganda_lines
-                   """)
-    buffcopy2.seek(0)
-    cursor.copy_from(buffcopy2, 'uganda_linepts')
-    cursor.execute("""INSERT INTO uganda_way_nodes
-                      SELECT A.uganda_id, B.uganda_id, C.sequence_id
-                      FROM uganda_lines A, uganda_points B, uganda_linepts C
-                      WHERE A.line_id = C.line_id
-                      AND C.point_id = B.point_id
-                   """)
-    cursor.execute("""INSERT INTO uganda_way_tags
-                      SELECT uganda_id, 'boundary', 'administrative'
-                      FROM uganda_lines
-                   """)
-    cursor.execute("""INSERT INTO uganda_way_tags
-                      SELECT uganda_id, 'admin_level', 8
-                      FROM uganda_lines
-                   """)
-    db.commit()
-    buffcopy1.close()
-    buffcopy2.close()
+        out.write('  <way id="-%d" version="0" timestamp="%s">\n' % (lineid, tmstamp))
+        for pointid in pntids:
+            out.write('    <nd ref="-%d"/>\n' % (pointid+1))
+        out.write('    <tag k="boundary" v="administrative"/>\n')
+        out.write('    <tag k="admin_level" v="%s"/>\n' % waylevel[lineid])
+        out.write('  </way>\n')
 
     # Admins -> Relations
-    # - bulk copy to a temp table to get a new unique id
-    # - bulk copy lines in admins in a temp table
-    # - correct outer ways administrative level
-    # - insert all tags for administrative area
-    logo.DEBUG("Write relations to database")
-    buffcopy1 = StringIO()
-    buffcopy2 = StringIO()
+    logo.DEBUG("Write relations")
     for (num,adm) in enumerate(admins):
         logo.progress()
-        buffcopy1.write("%d\t" % num)
-        buffcopy1.write("%(name)s\t%(level)d\n" % admins[adm])
-        sequenceid = 0
+        out.write('  <relation id="-%d" version="0" timestamp="%s">\n' % (num+1, tmstamp))
         for role in ("outer", "inner"):
             for lineid in admins[adm][role]:
-                buffcopy2.write("%d\t%d\t%s\t%d\n" % (
-                                num, lineid, role, sequenceid))
-                sequenceid += 1
-        if admins[adm]['level'] < 8:
-            cursor.execute("""UPDATE uganda_way_tags SET v = %(level)s
-                              FROM uganda_lines A
-                              WHERE uganda_way_tags.uganda_id = A.uganda_id
-                              AND A.line_id IN %(outer)s
-                              AND k = 'admin_level'
-                              AND v::int > %(level)s
-                           """, admins[adm])
-    db.commit()
-    buffcopy1.seek(0)
-    cursor.copy_from(buffcopy1, 'uganda_admins', columns=('admin_id', 'name',
-                                                        'level'))
-    cursor.execute("""INSERT INTO uganda_relations (uganda_id)
-                      SELECT uganda_id FROM uganda_admins
-                   """)
-    buffcopy2.seek(0)
-    cursor.copy_from(buffcopy2, 'uganda_adminlines')
-    cursor.execute("""INSERT INTO uganda_relation_members
-                      SELECT A.uganda_id, B.uganda_id, 'W', C.role, C.sequence_id
-                      FROM uganda_admins A, uganda_lines B, uganda_adminlines C
-                      WHERE A.admin_id = C.admin_id
-                      AND C.line_id = B.line_id
-                   """)
-    cursor.execute("""INSERT INTO uganda_relation_tags
-                      SELECT uganda_id, 'type', 'boundary'
-                      FROM uganda_admins
-                   """)
-    cursor.execute("""INSERT INTO uganda_relation_tags
-                      SELECT uganda_id, 'boundary', 'administrative'
-                      FROM uganda_admins
-                   """)
-    cursor.execute("""INSERT INTO uganda_relation_tags
-                      SELECT uganda_id, 'admin_level', level::text
-                      FROM uganda_admins
-                   """)
-    cursor.execute("""INSERT INTO uganda_relation_tags
-                      SELECT uganda_id, 'name', name
-                      FROM uganda_admins
-                   """)
-    db.commit()
-    buffcopy1.close()
-    buffcopy2.close()
+                out.write('    <member type="way" ref="-%d" role="%s"/>\n' % (lineid, role))
+        out.write('    <tag k="type" v="boundary"/>\n')
+        out.write('    <tag k="boundary" v="administrative"/>\n')
+        out.write('    <tag k="admin_level" v="%d"/>\n' % admins[adm]["level"])
+        out.write('    <tag k="name" v="%s"/>\n' % admins[adm]["name"])
+        out.write('  </relation>\n')
+    out.write('  </osm>\n')
     logo.ending()
-
-
-def vacuum_analyze_db(db):
-    """ Update DB statistics. """
-
-    logo.DEBUG("Vacuum Analyze")
-    isolation_level = db.isolation_level
-    db.set_isolation_level(0)
-    cursor = db.cursor()
-    cursor.execute("VACUUM ANALYZE")
-    db.set_isolation_level(isolation_level)
-
-
-def check_db_uganda(db):
-    """ Check for special uganda tables. """
-
-    logo.DEBUG("Checking for UGANDA tables ...")
-    cursor = db.cursor()
-    try:
-        cursor.execute("""SELECT max(uganda_id) FROM uganda_nodes
-                          UNION
-                          SELECT max(uganda_id) FROM uganda_ways
-                          UNION
-                          SELECT max(uganda_id) FROM uganda_relations
-                          UNION
-                          SELECT last_value FROM seq_uganda_id
-                       """)
-        cursor.fetchall()  # ignore result, just check if table exists
-    except psycopg2.ProgrammingError:
-        db.rollback()
-        logo.DEBUG("... no UGANDA tables")
-        return False
-    db.commit()
-    logo.DEBUG("... UGANDA tables exists")
-    return True
 
 
 def main():
@@ -600,13 +354,6 @@ def main():
               progress = uganda_config.progress)
     if len(sys.argv) < 2:
         raise logo.ERROR("Missing input Shapefile")
-
-    logo.DEBUG("Connect to DB(%s)" % uganda_config.dbname)
-    db = psycopg2.connect(uganda_config.dbname)
-    if not check_db_uganda(db):
-        logo.INFO("Creating PostgreSQL tables")
-        create_uganda_table(db)
-    create_temp_table(db)
 
     shapeu = ShapeUtil(uganda_config.cachesize)
     for i in xrange(1, len(sys.argv)):
@@ -623,9 +370,8 @@ def main():
     logo.INFO("Verifying administrative area")
     verify_admin(shapeu, admins)
 
-    logo.INFO("Importing into database")
-    import_uganda(db, shapeu, admins)
-    vacuum_analyze_db(db)
+    logo.INFO("Writing output file")
+    write_uganda(os.path.splitext(sys.argv[1])[0], shapeu, admins)
     logo.close()
 
 
