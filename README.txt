@@ -1,31 +1,33 @@
 You will need at least :
   - Python 2.7.3
   - gdal 1.7.3
-  - postgresql 9.1.3
-  - postgis 1.5.3
-  - psycopg2 2.4.5
 
-The converted OSM file will be saved in a local postgresql+postgis database.
-You'll have to set up a database and a user account.
-Tables will be created with an osmosis schema.
+This version will create an admin area .OSM file for Uganda.
+The output file will contains error so it MUST NOT BE IMPORTED into OSM.
 
-The postgres dependency will eventually be dropped, it's not needed if you
-only want an .osm file (only useful if you want to make conflation later).
+The postgres dependency have been removed, so the program will only give
+you an .osm file to be viewed (no conflation, so file can only be used
+for viewing purpose).
 
 There is a config file 'uganda_config.py' it's already set to be verbose.
+The log file will be named 'uganda.log'.
 
 
 Syntax :
 --------
 
   - python uganda_build.py Uganda_districts2010.shp
+or
+  - python uganda_build.py Uganda_Complete.osm
 
 
-The program is designed to append to database, if you want to clean it up
-before running drop a table (everything will be recreated) :
+The program will create an '_out.osm' file, in the first case the output
+will be named 'Uganda_districts2010_out.osm'.
 
-  - psql -d osmosis
-    - drop table uganda_relations;
+When giving an .osm input file, the file must be clean, it's intended that
+the file have been edited/corrected by hand, so that the program will
+only need to do simplification, split on node limits and grouping ways
+into admins with inner/outer role.
 
 
 Bug :
