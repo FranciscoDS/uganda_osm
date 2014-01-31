@@ -428,8 +428,19 @@ class ShapeUtil:
                 segmentdir2 = segmentdir1^1
                 seg = self.segment_connect[segmentdir2]
                 if seg == segmentdir2:
-                    # Adopting a loose end is easy
-                    self.segment_connect[segmentnum] = segmentnum
+                    if segmentdir1 != segmentnum:
+                        # Adopting a loose end is easy
+                        self.segment_connect[segmentnum] = segmentnum
+                    else:
+                        # We *are* a loose end with no next segment (a loop
+                        # reduced to a segment), removing one point mean
+                        # reducing to a single point, so remove both of them
+                        # (there's no point left)
+                        coord2 = self.coord_pnt[segmentdir2]
+                        del self.point_pos[coord]
+                        del self.point_pos[coord2]
+                        self.line_seg[int(segmentnum/2)] = 0
+                        return
                 else:
                     # Remove 2nd segment from the linked list
                     while self.segment_connect[seg] != segmentdir2:

@@ -26,10 +26,11 @@ import re
 import os
 import datetime
 from osgeo import gdal, ogr, osr
-from shapeu import ShapeUtil
+import shapeu as shapeutil
 from ringue import FindClosedRings
 import logo
 import uganda_config
+import parseosm
 
 # GDAL 1.9.0 can do the ISO8859-1 to UTF-8 recoding for us
 # but will do it ourself to be backward compatible
@@ -303,7 +304,7 @@ def write_uganda(fileout, shapeu, admins):
     logo.starting("Saving nodes, ways, relations",
                   shapeu.nbrPoints() + shapeu.nbrLines() + len(admins))
 
-    out = open(fileout+".osm", "w")
+    out = open(fileout+"_out.osm", "w")
     tmstamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
     out.write('<osm version="0.6" generator="test">\n')
@@ -328,7 +329,10 @@ def write_uganda(fileout, shapeu, admins):
         for pointid in pntids:
             out.write('    <nd ref="-%d"/>\n' % (pointid+1))
         out.write('    <tag k="boundary" v="administrative"/>\n')
-        out.write('    <tag k="admin_level" v="%s"/>\n' % waylevel[lineid])
+        try:
+            out.write('    <tag k="admin_level" v="%s"/>\n' % waylevel[lineid])
+        except KeyError:
+            pass  # because of inner ring in middle of river and not in any admin area outer
         out.write('  </way>\n')
 
     # Admins -> Relations
@@ -343,8 +347,69 @@ def write_uganda(fileout, shapeu, admins):
         out.write('    <tag k="boundary" v="administrative"/>\n')
         out.write('    <tag k="admin_level" v="%d"/>\n' % admins[adm]["level"])
         out.write('    <tag k="name" v="%s"/>\n' % admins[adm]["name"])
+        if "old_name" in admins[adm]:
+            out.write('    <tag k="old_name" v="%s"/>\n' % admins[adm]["old_name"])
         out.write('  </relation>\n')
     out.write('  </osm>\n')
+    logo.ending()
+
+
+def read_UGANDA_OSM(filename, shapeu):
+    parseosm.parse_xml(open(filename).read())
+    shapeutil.precision = 14  # don't do aggressive rounding
+    shapeutil.testnearest = []  # nor neighbour hack
+
+    # Read each polygon and build the connection arrays (point, segment, line)
+    logo.starting("Geometry read", parseosm.getNbRelation())
+    for relationid in parseosm.getIterRelation():
+        logo.progress()
+        relation = parseosm.getRelation(relationid)
+        wayids = [ data[1] for data in relation['members']
+                   if data[0] == 'way' and data[2] in ('outer', 'inner') ]
+
+        for wayid in wayids:
+            linegeometry = parseosm.getGeometryWay(wayid)
+            lon1, lat1 = linegeometry[0]
+            for lon2, lat2 in linegeometry[1:]:
+                shapeu.makeSegment(lon1, lat1, lon2, lat2)
+                lon1, lat1 = lon2, lat2
+    logo.ending()
+
+
+def admin_UGANDA_OSM(filename, shapeu, admins):
+    logo.starting("Attributes read", parseosm.getNbRelation())
+    for relationid in parseosm.getIterRelation():
+        logo.progress()
+        relation = parseosm.getRelation(relationid)
+
+        admins[relationid] = { "name" : relation['tags']['name'],
+                               "level" : int(relation['tags']['admin_level']),
+                               "inner" : set(),
+                               "outer" : set(),
+                             }
+        if 'old_name' in relation['tags']:
+            admins[relationid]["old_name"] = relation['tags']['old_name']
+
+        wayids = [ data[1] for data in relation['members']
+                   if data[0] == 'way' and data[2] in ('outer', 'inner') ]
+        lineset = set()
+        for wayid in wayids:
+            pntinring = []
+            linegeometry = parseosm.getGeometryWay(wayid)
+            for lon, lat in linegeometry:
+                pointid = shapeu.getPoint(lon, lat)
+                if pointid is not None:
+                    pntinring.append(pointid)
+
+            for pnt in xrange(1, len(pntinring)):
+                if pntinring[pnt-1] ==  pntinring[pnt]:
+                    # If 2 coordinates after rounding give the same point id
+                    continue
+                segment = shapeu.getSegment(pntinring[pnt-1], pntinring[pnt])
+                lineset.add(shapeu.getLine(segment))
+
+        # Update each administrative level
+        admins[relationid]["outer"].update(lineset)
     logo.ending()
 
 
@@ -355,10 +420,13 @@ def main():
     if len(sys.argv) < 2:
         raise logo.ERROR("Missing input Shapefile")
 
-    shapeu = ShapeUtil(uganda_config.cachesize)
+    shapeu = shapeutil.ShapeUtil(uganda_config.cachesize)
     for i in xrange(1, len(sys.argv)):
         logo.INFO("Reading geometries '%s'" % sys.argv[i])
-        read_UGANDA(sys.argv[i], shapeu)
+        if sys.argv[i].endswith(".osm"):
+            read_UGANDA_OSM(sys.argv[i], shapeu)
+        else:
+            read_UGANDA(sys.argv[i], shapeu)
 
     logo.INFO("Simplify geometries")
     shapeu.buildSimplifiedLines()
@@ -366,7 +434,10 @@ def main():
     logo.INFO("Building administrative area")
     admins = {}
     for i in xrange(1, len(sys.argv)):
-        admin_UGANDA(sys.argv[i], shapeu, admins)
+        if sys.argv[i].endswith(".osm"):
+            admin_UGANDA_OSM(sys.argv[i], shapeu, admins)
+        else:
+            admin_UGANDA(sys.argv[i], shapeu, admins)
     logo.INFO("Verifying administrative area")
     verify_admin(shapeu, admins)
 
